@@ -1,0 +1,6 @@
+============
+Django Forms
+============
+
+An designer-focussed forms control library which works as a layer over the
+standard Django forms API.
