@@ -1,0 +1,7 @@
+{% form errors field as errors %}
+{% if errors %}
+<li>{{ errors }}</li>
+{% endif %}
+<li{% build_attrs class=field.html_classes attrs %}>
+    {% form label field for=value.id %}{{ value }}{% form help field %}{{ text }}
+</li>
