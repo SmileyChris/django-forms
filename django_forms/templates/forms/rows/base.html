@@ -1,0 +1,5 @@
+{% load forms %}{% block row_start %}{% endblock %}
+{% for field in fields %}
+    {% block field %}{% field field %}{% endblock %}
+{% endfor %}
+{% block row_end %}{% endblock %}

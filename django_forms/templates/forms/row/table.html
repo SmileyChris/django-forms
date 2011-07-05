@@ -1,8 +1,0 @@
-{% form errors field as errors %}
-{% if errors %}
-<tr><td colspan="2">{{ errors }}</td></tr>
-{% endif %}
-<tr{% build_attrs class=field.html_classes attrs %}>
-<td>{% form label field for=value.id %}</td>
-<td>{{ value }}{% form help field %}{{ text }}</td>
-</tr>

@@ -1,0 +1,12 @@
+{% load forms %}{% block allconfig %}{% block config %}{% endblock %}{% endblock %}
+
+{% block non_field_errors %}
+{% include "forms/errors.html" with errors=non_field_errors %}
+{% endblock %}
+
+{% get_ordered_rows forms as rows %}
+{% block rows %}
+{% for fields in rows %}
+    {% row fields %}
+{% endfor %}
+{% endblock %}

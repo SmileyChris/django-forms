@@ -1,35 +1,17 @@
 #!/usr/bin/env python
-from distutils.core import setup
-from django_forms import get_version
-
-
-def read_files(*filenames):
-    """
-    Output the contents of one or more files to a single concatenated string.
-
-    """
-    output = []
-    for filename in filenames:
-        f = open(filename)
-        try:
-            output.append(f.read())
-        finally:
-            f.close()
-    return '\n'.join(output)
-
+from setuptools import setup, find_packages
 
 setup(
-    name='easy-thumbnails',
-    version=get_version(join='-'),
+    name='django-forms',
+    version='0.1',
     description='Django forms API designed to provide full form control to '
         'template designers.',
-    long_description=read_files('README'),
+    long_description=open('README.rst').read(),
     author='Chris Beaven',
     author_email='smileychris@gmail.com',
     platforms=['any'],
-    packages=[
-        'django_forms',
-    ],
+    install_requires=['django-ttag'],
+    packages=find_packages(),
     classifiers=[
         'Development Status :: 3 - Alpha',
         'Environment :: Web Environment',

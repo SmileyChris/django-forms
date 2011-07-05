@@ -49,17 +49,9 @@ class FormsTest(BaseFormsTest):
 
     def test_basic(self):
         t = template.Template('{% load forms %}'
-                              '{% form field form.email "p" %}')
+                              '{% field form.email %}')
         output = t.render(template.Context({'form': TestForm()}))
-        expected = '<input type="text" id="id_email" />'
-        self.assertEqual(output, expected)
-
-
-class UtilsTest(BaseFormsTest):
-    """
-    Tests for the django-forms utility methods.
-
-    """
-
-    def test_template_locations(self):
-        pass
+        expected = '<label for="id_email">Email</label>'\
+            '<input type="text" name="email" value="" id="id_email" />'
+        
+        self.assertEqual(output.strip().replace('\n', ''), expected)

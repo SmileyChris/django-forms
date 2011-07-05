@@ -1,0 +1,12 @@
+{% load forms %}{% if label %}
+    <label{% if id_for_label %} for="{{ id_for_label }}"{% endif %}>{% block label %}{{ label }}{% endblock %}</label>
+{% endif %}
+<input type="text" name="{{ html_name }}" value="{{ value|default_if_none:'' }}" id="{{ id }}" />
+{% include "forms/errors.html" %}
+{% ifcontent %}
+    <span class="helptext">
+        {% content %}
+            {% block help %}{{ help_text }}{% endblock %}
+        {% endcontent %}
+    </span>
+{% endifcontent %}

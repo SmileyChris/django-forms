@@ -1,0 +1,9 @@
+{% extends "forms/rows/base.html" %}
+{% load forms %}
+
+{% block field %}
+{% include "forms/errors.html" with errors=field.errors %}
+<p{% if errors or required %} class="{% if errors %}errors{% if required %} {% endif %}{% endif %}{% if required %}required{% endif %}"{% endif %}>
+{% field field with errors='' %}
+</p>
+{% endblock %}

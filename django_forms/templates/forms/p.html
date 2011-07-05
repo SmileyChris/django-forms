@@ -1,0 +1,7 @@
+{% extends "forms/base.html" %}
+{% load forms %}
+
+{% block allconfig %}
+    {% formconfig row using "forms/rows/p.html" %}
+    {% block config %}{% endblock %}
+{% endblock %}

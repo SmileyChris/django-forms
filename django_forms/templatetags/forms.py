@@ -1,259 +1,313 @@
-import re
-from django import template, forms
-from django.template import loader
-from django_forms import utils
-import copy
+import ttag
+from ttag import core
+from django import template
+from django.forms.forms import BoundField
+from django.template.loader import get_template
+from django.template.loader_tags import BlockNode, ExtendsNode, \
+    BLOCK_CONTEXT_KEY, BlockContext
 
 register = template.Library()
-re_kwarg = re.compile(r'^(?:(\w+\.)(?\w)=)(.*)')
+CONFIG_KEY = '_formconfig'
+INHERIT = object()
 
 
-def _load_form_template(element, context, context_bit=None,
-                        specific_template=None):
-    """
-    Select the appropriate form template.
+class TemplateArg(ttag.Arg):
 
-    """
-    context_bit = context_bit or element
-    template_bit = context.get('_django_template_%s' % context_bit, 'default')
-    templates = []
-    if specific_template:
-        templates.append('%s/%s.html' % (element, template))
-    templates.append('%s/%s.html' % (element, template_bit))
-    base = context.get('_django_template_base')
-    return loader.select_template(utils.template_locations(templates, base))
+    def clean(self, value):
+        if value is None or value is INHERIT:
+            return None
+        if hasattr(value, 'render'):
+            return value
+        return get_template(value)
+
+    def resolve(self, value, context):
+        if value is None:
+            return INHERIT
+        return super(TemplateArg, self).resolve(value, context)
 
 
-class MediaNode(object):
+class FormOptions(core.Options):
 
-    def __init__(self, template, nodelist, media_type=None, extra_context={}):
-        self.template = template
-        self.nodelist = nodelist
-        self.media_type = media_type
-        self.extra_context = extra_context
+    def __init__(self, meta, *args, **kwargs):
+        super(FormOptions, self).__init__(meta=meta, *args, **kwargs)
+        self.default_template = getattr(meta, 'default_template', None)
+
+
+class FormMetaclass(core.DeclarativeArgsMetaclass):
+    options_class = FormOptions
+
+
+class FormOptionsTag(core.BaseTag):
+    __metaclass__ = FormMetaclass
+
+
+class ConfigMixin(object):
+
+    def get_fields(self, data):
+        return []
+
+    def init_config(self, context):
+        context[CONFIG_KEY] = {}
+
+    def get_config(self, type, data, context, fields=None):
+        config_fields = context.get(CONFIG_KEY, {}).get(type)
+        if not config_fields:
+            return None
+        if fields is None:
+            fields = self.get_fields(data)
+        for field in fields:
+            field_repr = (field.form, field.name)
+            config = config_fields.get(field_repr,
+                config_fields.get(field.name))
+            if config is not None:
+                return config
+        return config_fields.get(None)
+
+    def set_config(self, type, data, context, value, set_none=False):
+        if set_none or value is not None:
+            config_fields = context[CONFIG_KEY].setdefault(type, {})
+            fields = self.get_fields(data)
+            if fields:
+                for field in fields:
+                    if isinstance(field, BoundField):
+                        field = (field.form, field.name)
+                    config_fields[field] = value
+            else:
+                config_fields[None] = value
+            return True
+
+
+class BaseFormTag(FormOptionsTag, ConfigMixin):
+    with_ = ttag.KeywordsArg(required=False, named=True)
+    only = ttag.BooleanArg()
+    using = TemplateArg(required=False, named=True)
+    extends = TemplateArg(required=False, named=True)
+
+    def __init__(self, parser, *args, **kwargs):
+        super(BaseFormTag, self).__init__(parser, *args, **kwargs)
+        if 'using' in self._vars and 'extends' in self._vars:
+            raise template.TemplateSyntaxError("Can't provide both 'using' "
+                "and 'extends'.")
+        using_inline = 'using' in self._vars and not self._vars['using']
+        if using_inline or 'extends' in self._vars:
+            nodelist = parser.parse([self._meta.end_block])
+            parser.delete_first_token()
+            if using_inline:
+                self._vars['using'] = template.Template('')
+                self._vars['using'].nodelist = nodelist
+            else:
+                self.blocks = dict([(n.name, n) for n in
+                    nodelist.get_nodes_by_type(BlockNode)])
+
+    def clean(self, data, context):
+        data = super(BaseFormTag, self).clean(data, context)
+        form_template = data.get('using') or data.get('extends')
+        if not form_template:
+            if not self._meta.default_template:
+                return data
+            form_template = self.get_config('%s_template' % self._meta.name,
+                data, context) or self._meta.default_template
+        if isinstance(form_template, basestring):
+            form_template = get_template(form_template)
+        data['template'] = form_template
+        return data
+
+    def get_extra_context(self, data):
+        return {}
+
+    def get_block_context(self, form_template, blocks):
+        block_context = BlockContext()
+
+        # Add the block nodes from this node to the block context.
+        block_context.add_blocks(blocks)
+
+        # Add the template's nodes too if it is the root template.
+        for node in form_template.nodelist:
+            # The ExtendsNode has to be the first non-text node.
+            if not isinstance(node, template.TextNode):
+                if not isinstance(node, ExtendsNode):
+                    blocks = dict([(n.name, n) for n in
+                                   form_template.nodelist\
+                                       .get_nodes_by_type(BlockNode)])
+                    block_context.add_blocks(blocks)
+                break
+        return block_context
 
     def render(self, context):
-        output = self.nodelist.render(context)
+        data = self.resolve(context)
 
-        # After the template is completely rendered, there should be a
-        # ``_forms`` item on the RequestContext which contains all of the forms
-        # rendered with the ``{% form %}`` tag.
-        forms = context.render_context.get('_forms')
-        if not forms:
-            return output
-        media = forms[0].media
-        for form in forms[1:]:
-            media += form.media
-        templates = utils.template_locations(self.template)
-        template = loader.select_template(templates)
-        if self.media_type:
-            media = media[self.media_type]
-        context = {'media': media}
-        context.update(self.extra_context)
-        return '%s%s' % (template.render(template.Context(context)),
-                         output)
+        if 'only' in data or self.get_config('only', data, context):
+            sub_context = template.Context()
+            for key, value in context.keys:
+                if key in ('form', CONFIG_KEY):
+                    sub_context[key] = value
+        else:
+            sub_context = context
 
-
-class FormTemplateNode(object):
-
-    def __init__(self, nodelist, **kwargs):
-        self.nodelist = nodelist
-        self.kwargs = kwargs
-
-    def render(self, context):
-        context_args = {}
-        for key, var in self.kwargs.iteritems():
-            context_args['_django_template_%s' % key] = var.resolve(context)
-        context.update(context_args)
-        output = self.nodelist.render(context)
-        context.pop()
+        extra_context = self.get_extra_context(data)
+        extra_context.update(self.get_config('with', data, context) or {})
+        if 'with' in data:
+            extra_context.update(data['with'])
+        # Update (i.e. push) context in preparation for rendering.
+        sub_context.update(extra_context)
+        context.render_context.push()
+        blocks = getattr(self, 'blocks',
+            self.get_config('extends_blocks', data, context))
+        if blocks:
+            context.render_context[BLOCK_CONTEXT_KEY] = \
+                self.get_block_context(data['template'], blocks)
+        output = data['template']._render(sub_context)
+        # Clean up context changes.
+        context.render_context.pop()
+        sub_context.pop()
         return output
 
 
-class FormBlockNode(object):
+class Form(BaseFormTag):
+    forms = ttag.MultiArg(required=False)
 
-    def __init__(self, nodelist):
-        self.nodelist = nodelist
-
-    def render(self, context):
-        template = _load_form_template('block', context, context_bit='row')
-        remaining_output = self.nodelist.render(context)
-
-        context.push()
-        context['data'] = remaining_output
-        try:
-            return template.render()
-        finally:
-            context.pop()
-
-
-class FormNode(object):
-
-    def __init__(self, action, args, all_vars):
-        self.action = action
-        self.args = args
-        self.all_vars = all_vars
+    class Meta:
+        default_template = 'forms/base.html'
 
     def render(self, context):
-        args = [arg.resolve(context) for arg in self.args]
-        if isinstance(args[0], forms.Field):
-            field, args = args[0], args[1:]
-        else:
-            field = context['field']
-        if args:
-            specific_template = args[0]
-        else:
-            specific_template = None
-        template = _load_form_template(self.action, context,
-                                       specific_template=specific_template)
+        self.init_config(context)
+        return super(Form, self).render(context)
 
-        form_vars = copy.deepcopy(self.all_vars)
-        _resolve_dict(form_vars, context)
+    def get_extra_context(self, data):
+        errors = False
+        non_field_errors = []
+        for form in data['forms']:
+            if form.errors:
+                errors = True
+                break
+            non_field_errors.extend(form.non_field_errors())
 
-        context.update({'field': field, 'form_vars': form_vars})
-        try:
-            return template.render(context)
-        finally:
-            context.pop()
+        return {
+            'forms': data['forms'],
+            'errors': errors,
+            'non_field_errors': non_field_errors,
+        }
 
 
-@register.tag
-def form_js(parser, token):
-    """
-    Render the JS media for all forms in a template.
+class FieldsArg(ttag.MultiArg):
 
-    """
-    bits = token.split_contents()
-    tag_name, bits = bits[0], bits[1:]
-    if bits:
-        raise template.TemplateSyntaxError('%s did not expect any arguments' %
-                                           tag_name)
-    nodelist = parser.parse()
-    return MediaNode('media/js.html', nodelist, 'js')
+    def clean(self, value):
+        if len(value) == 1 and isinstance(value[0], (tuple, list)):
+            value = value[0]
+        return value
 
 
-@register.tag
-def form_css(parser, token):
-    """
-    Render the CSS media for all forms in a template.
+class Row(BaseFormTag):
+    fields = FieldsArg()
 
-    """
-    bits = token.split_contents()
-    tag_name, bits = bits[0], bits[1:]
-    if len(bits) not in (0, 1):
-        raise template.TemplateSyntaxError('%s did not expect any arguments' %
-                                           tag_name)
-    nodelist = parser.parse()
-    return MediaNode('media/css.html', nodelist, 'css')
+    class Meta:
+        default_template = 'forms/rows/base.html'
+
+    def get_fields(self, data):
+        return data['fields']
+
+    def get_extra_context(self, data):
+        errors = []
+        required = 0
+        for field in data['fields']:
+            errors += field.errors
+            if field.field.required:
+                required += 1
+        return {
+            'fields': data['fields'],
+            'errors': errors,
+            'required': required,
+        }
 
 
-@register.tag
-def formtemplate(parser, token):
-    """
-    This block tag (i.e. must be closed with ``{% endformtemplate %}``) has two
-    purposes:
+class Field(BaseFormTag):
+    field = ttag.Arg()
+
+    class Meta:
+        default_template = 'forms/fields/base.html'
+
+    def get_fields(self, data):
+        return [data['field']]
     
-    1. It allows an alternate base directory to be used for finding element
-       templates.
-    
-    2. It can be used to set default element templates.
-    
-    The format is::
-    
-        {% formtemplate [base="template_base"] [<element_template>="somealternate" ...] %}
-        ...
-        {% endformtemplate %}
-
-    """
-    bits = token.split_contents()
-    tag_name, bits = bits[0], bits[1:]
-
-    kwargs = {}
-    for bit in bits:
-        pre_key, key, arg = re_kwarg.match(bit).groups()
-        if pre_key:
-            raise template.TemplateSyntaxError('Bad keyword argument for %s'
-                    ' (%s.%s)' % (tag_name, pre_key, key))
-        if not key:
-            raise template.TemplateSyntaxError('%s does not expect any '
-                    'non-keyword arguments' % tag_name)
-        # TODO: use a whitelist (raising a syntax error for bad keys)?
-        kwargs[key] = parser.compile_filter(arg)
-
-    nodelist = parser.parse('end%s' % tag_name)
-    nodelist.delete_first_token()
-    return FormTemplateNode(nodelist, **kwargs)
+    def get_extra_context(self, data):
+        field = data['field']
+        context = {}
+        for attr in ('value', 'errors', 'label', 'help_text', 'form', 'field',
+            'id_for_label', 'name', 'html_name'):
+            context[attr] = getattr(field, attr)
+        context['id'] = field.auto_id
+        return context
 
 
-@register.tag
-def formblock(parser, token):
-    """
-    Wrap rows with the correct HTML block tag (or common code
-    prepended/appended) for the current form template settings.
+class Formconfig(BaseFormTag):
+    context = ttag.BasicArg()
+    for_ = ttag.MultiArg(named=True, required=False)
+    position = ttag.IntegerArg(named=True, required=False)
 
-    The template used is determined based on the default **row** element
-    template in the current context.
+    def __init__(self, *args, **kwargs):
+        super(Formconfig, self).__init__(*args, **kwargs)
+        if self._vars['context'] not in ('field', 'row'):
+            raise template.TemplateSyntaxError("First argument must be "
+                "'field' or 'row' (found %r)." % self._vars['context'])
 
-    """
-    bits = token.split_contents()
-    tag_name, bits = bits[0], bits[1:]
+    def get_fields(self, data):
+        return data.get('for') or []
 
-    if bits:
-        raise template.TemplateSyntaxError('%s did not expect any arguments' %
-                                           tag_name)
-
-    nodelist = parser.parse('end%s' % tag_name)
-    nodelist.delete_first_token()
-    return FormBlockNode(nodelist)
-
-
-@register.tag
-def form(parser, token):
-    """
-    The fundamental tag for the django-forms library.
-
-    """
-    bits = token.split_contents()
-    tag_name, bits = bits[0], bits[1:]
-
-    args = []
-    action = None
-    all_vars = {}
-    for bit in bits:
-        pre_key, key, arg = re_kwarg.match(bit).groups()
-        if (key and len(bits) < 1) or (not key and len(bits) >= 3):
-            raise template.TemplateSyntaxError('Expected format {%% %s '
-                '<action> <object> [template] [attr=value ...] %}' % tag_name)
-        action = args[0]
-        pre_key = pre_key or action
-        if pre_key:
-            value = parser.compile_filter(arg)
-            action_vars = all_vars.setdefault(pre_key, {})
-            if key in ('text',):
-                action_vars[key] = value
-            else:
-                action_attrs = all_vars.setdefault('attrs', {})
-                action_attrs[key] = value
-        else:
-            if not action:
-                # The first argument is the action - it doesn't need to be
-                # compiled.
-                action = arg
-            else:
-                args.append(parser.compile_filter(arg))
-
-    # TODO: validate the action?
-
-    return FormNode(action, args, all_vars)
+    def render(self, context):
+        data = self.resolve(context)
+        self.set_config('%s_template' % data['context'], data, context,
+            data.get('template'))
+        self.set_config('with', data, context, data.get('with'))
+        self.set_config('only', data, context, data.get('only'))
+        if data.get('for'):
+            self.set_config('position', data, context, data.get('position'))
+        if 'extends' in data:
+            self.set_config('extends_blocks', data, context, self.blocks)
+        return ''
 
 
-def _resolve_dict(dict, context):
-    """
-    Recursively resolve all dictionary items using the context.
+class GetOrderedRows(ttag.helpers.AsTag, ConfigMixin):
+    forms_list = ttag.Arg()
 
-    """
-    for key, value in dict.values():
-        if isinstance(value, dict):
-            value = _resolve_dict(value, context)
-        else:
-            dict[key] = value.resolve(context)
+    def as_value(self, data, context):
+        rows = []
+        for form in data['forms_list']:
+            for bound_field in form:
+                position = self.get_config('position', data, context,
+                    fields=[bound_field]) or 0
+                # For now, there's nothing to put more than one field in a row.
+                rows.append((position, [bound_field]))
+        rows.sort(key=lambda bits: bits[0], reverse=True)
+        return [bits[1] for bits in rows]
+
+
+class Ifcontent(ttag.Tag):
+
+    def __init__(self, parser, *args, **kwargs):
+        super(Ifcontent, self).__init__(parser, *args, **kwargs)
+        self.nodelist_before = parser.parse(['content'])
+        parser.delete_first_token()
+        self.nodelist_inner = parser.parse(['endcontent'])
+        parser.delete_first_token()
+        self.nodelist_after = parser.parse([self._meta.end_block])
+        parser.delete_first_token()
+        self.child_nodelists = ('nodelist_before', 'nodelist_inner',
+            'nodelist_after')
+
+    def render(self, context):
+        value = self.nodelist_inner.render(context)
+        if not value.strip():
+            return ''
+        return ''.join((
+            self.nodelist_before.render(context),
+            value,
+            self.nodelist_after.render(context)
+        ))
+
+
+register.tag(Form)
+register.tag(Row)
+register.tag(Field)
+register.tag(Formconfig)
+register.tag(GetOrderedRows)
+register.tag(Ifcontent)
